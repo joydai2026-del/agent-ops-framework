@@ -1,0 +1,8 @@
+Scheduled trigger: morning supplier sweep.
+@agent-north @agent-south @agent-relief
+First reply in this thread claims it; everyone else stands down. Your first message IS the claim.
+
+1. Catch up first: if an earlier cycle has no work log row, finish that before today's work.
+2. Run every lane in desk/runbooks/morning-supplier-sweep.md: learning first, then drafting, then deliveries.
+3. Drafts only. The owner sends. If the credential wrapper refuses you, reply BLOCKED and stop.
+4. Post COMPLETE / ZERO WORK / PARTIAL / BLOCKED in this thread when done, one line per lane, then append the work log row. Silence is not allowed.

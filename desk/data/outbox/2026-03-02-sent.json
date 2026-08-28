@@ -1,0 +1,34 @@
+[
+  {
+    "id": "out-0031",
+    "thread": "t-northwind-flour",
+    "direction": "outbound",
+    "sent_at": "2026-03-02T13:05:00Z",
+    "subject": "Re: Q2 pricing on the high-gluten flour",
+    "body": "Hi Peter, thanks for the heads up. Same volume on the 25kg high-gluten, no step up this quarter. Please leave the rye off the quote, we moved the Friday loaf to a spelt blend in January. Send the sheet over by Friday and I will sign it same day."
+  },
+  {
+    "id": "out-0032",
+    "thread": "t-harbor-yeast",
+    "direction": "outbound",
+    "sent_at": "2026-03-02T10:30:00Z",
+    "subject": "Re: yeast order confirmation",
+    "body": "Great, thanks."
+  },
+  {
+    "id": "out-0033",
+    "thread": "t-mill-lane-packaging",
+    "direction": "outbound",
+    "sent_at": "2026-03-01T18:45:00Z",
+    "subject": "Re: Kraft box minimums going up",
+    "body": "Sam, appreciate the warning. Yes to one more run at the old minimum, 500 units, same kraft spec. We cannot carry 1000 units of storage here, so from April we will split the order with the shop on Vine Street rather than take the bigger minimum ourselves. I will introduce you to their owner once that is agreed."
+  },
+  {
+    "id": "out-0034",
+    "thread": "t-cold-storage-lease",
+    "direction": "outbound",
+    "sent_at": "2026-03-02T07:50:00Z",
+    "subject": "Walk-in freezer service contract",
+    "body": "Hi Marcus, following up on the walk-in freezer. We want the service contract to cover the gasket and the compressor, quarterly, before the summer. Our prep window is 4am to 9am, so any visit has to land after 1pm. Can you send a quote with those two constraints written in? Anything scheduled in the morning gets turned away at the door."
+  }
+]

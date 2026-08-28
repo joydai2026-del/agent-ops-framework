@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Stand in for the real mail CLI, so the demo and the tests can prove that the
+# gate blocks `send` and lets everything else through without any credentials.
+set -euo pipefail
+echo "mailer-backend: executed verb '${1:-<none>}' with args: $*"

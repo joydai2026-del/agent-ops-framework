@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# mailer-gw: the desk's mail credential, wrapped.
+#
+# The rule is "read everything, draft freely, never send". No mail provider
+# offers a scope that grants drafting without granting sending, so a scope
+# alone cannot express it. Written as a prompt rule it is a policy promise: it
+# holds exactly as long as every agent, on every model, forever, follows it.
+#
+# Here it is a capability guarantee instead. The desk's agents are given this
+# wrapper and never the underlying CLI, so the send verb is not reachable from
+# inside the desk. An agent that decides to send has nothing to send with, and
+# the refusal is visible (exit 3, message on stderr) rather than silent.
+#
+# The escape hatch is per call and explicit, so a human who genuinely wants one
+# send has to say so for that one command:
+#   MAILER_GW_ALLOW_SEND=1 mailer-gw send --thread t-alpine-dairy
+set -euo pipefail
+
+REAL_CLI="${MAILER_GW_BACKEND:-$(dirname "$0")/mailer-backend}"
+
+for arg in "$@"; do
+  if [[ "$arg" == "send" ]]; then
+    if [[ "${MAILER_GW_ALLOW_SEND:-0}" != "1" ]]; then
+      echo "BLOCKED by mailer-gw: this desk drafts only; sending is the owner's action." >&2
+      echo "Reading, drafting and labelling all pass through unchanged." >&2
+      echo "To permit this one call: MAILER_GW_ALLOW_SEND=1 mailer-gw $*" >&2
+      exit 3
+    fi
+  fi
+done
+
+exec "$REAL_CLI" "$@"

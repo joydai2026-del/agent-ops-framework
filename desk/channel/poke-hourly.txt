@@ -1,0 +1,7 @@
+Scheduled trigger: hourly inbox sweep.
+@agent-north @agent-south @agent-relief
+First reply in this thread claims it; everyone else stands down. Your first message IS the claim.
+
+1. Skip rule: if a full cycle finished within the last 45 minutes, reply SKIPPED-RECENT and stop.
+2. Learn first, then draft, per desk/runbooks/hourly-inbox-sweep.md. Route the execution to a cheap model; this lane needs no frontier judgment.
+3. Drafts only. Report exactly ONE short line: "N drafts, M closed", or ZERO WORK, or SKIPPED-RECENT, or BLOCKED.

@@ -1,0 +1,48 @@
+# The primary clock. It sends one message to the roster and nothing else: no
+# work logic runs here, so a schedule change cannot break the work and a work
+# change cannot break the schedule.
+#
+# Two facts about hosted cron that the operating model is built around:
+#
+#  1. GitHub Actions cron is UTC only. A local-time desk therefore either moves
+#     its cron twice a year, or runs two crons and lets a guard step decide
+#     which one is live today. Below is the guard step version, because a
+#     reminder in a calendar is not a mechanism.
+#  2. Scheduled runs are delivered late at busy hours and are occasionally
+#     dropped outright. That is why the cron sits a few minutes early, and why
+#     a local scheduler runs the same poke as a backup clock. A duplicate poke
+#     is harmless: the first agent to answer claims the cycle, and the rest
+#     stand down.
+name: poke-morning
+
+on:
+  schedule:
+    - cron: "55 12 * * 1-5"  # 08:55 America/New_York while daylight time is in effect
+    - cron: "55 13 * * 1-5"  # 08:55 America/New_York while standard time is in effect
+  workflow_dispatch:
+
+jobs:
+  poke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Only the cron that matches today's local time may proceed
+        id: guard
+        run: |
+          set -euo pipefail
+          local_hour="$(TZ=America/New_York date +%H)"
+          if [ "${{ github.event_name }}" != "schedule" ] || [ "$local_hour" = "08" ]; then
+            echo "live=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "live=false" >> "$GITHUB_OUTPUT"
+            echo "skipping: fired at local hour $local_hour, not 08"
+          fi
+
+      - name: Send the poke
+        if: steps.guard.outputs.live == 'true'
+        # In a real deployment POKE_TRANSPORT points at the messaging CLI and
+        # its credential comes from repository secrets. Left unset, the sender
+        # prints the poke, which is what makes this workflow safe to run here
+        # and in any fork.
+        run: scripts/send-poke.sh desk/channel poke-morning.txt

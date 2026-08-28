@@ -1,0 +1,42 @@
+[
+  {
+    "id": "in-0011",
+    "thread": "t-northwind-flour",
+    "direction": "inbound",
+    "sent_at": "2026-03-02T08:12:00Z",
+    "subject": "Q2 pricing on the high-gluten flour",
+    "body": "Morning Dana. We are locking Q2 pricing this week. Rolling Pin is on the 25kg high-gluten line at last quarter's rate. Do you want the same volume, or should I quote a step up? Also happy to include the rye if you are still running the Friday loaf.\n\nPeter, Northwind Flour Co."
+  },
+  {
+    "id": "in-0012",
+    "thread": "t-alpine-dairy",
+    "direction": "inbound",
+    "sent_at": "2026-03-02T09:40:00Z",
+    "subject": "Thursday delivery window",
+    "body": "Hi Dana, our Thursday driver route changed. Can we move your butter and cream drop from 6am to 11am starting next week? Let me know if that breaks your prep.\n\nLucia, Alpine Dairy"
+  },
+  {
+    "id": "in-0013",
+    "thread": "t-harbor-yeast",
+    "direction": "inbound",
+    "sent_at": "2026-03-02T10:02:00Z",
+    "subject": "Re: yeast order confirmation",
+    "body": "Thanks Dana, confirmed on our end. Nothing further needed."
+  },
+  {
+    "id": "in-0014",
+    "thread": "t-fernwood-berries",
+    "direction": "inbound",
+    "sent_at": "2026-03-02T11:15:00Z",
+    "subject": "Introducing Fernwood Berry Farm",
+    "body": "Hello, we are a family berry farm two hours north and we supply several independent bakeries. We would love to send a sample flat of raspberries and talk about a summer contract. Who is the right person to speak with about new suppliers?\n\nRoss, Fernwood Berry Farm"
+  },
+  {
+    "id": "in-0015",
+    "thread": "t-mill-lane-packaging",
+    "direction": "inbound",
+    "sent_at": "2026-03-01T16:20:00Z",
+    "subject": "Kraft box minimums going up",
+    "body": "Dana, our kraft pastry box minimum moves from 500 to 1000 units in April. Wanted you to hear it from us first. Do you want to place one more order at the old minimum?\n\nSam, Mill Lane Packaging"
+  }
+]

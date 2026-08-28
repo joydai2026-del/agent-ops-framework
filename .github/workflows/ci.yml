@@ -1,0 +1,33 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Tests
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Demo desk runs end to end
+        run: |
+          python3 scripts/run_cycle.py --agent agent-north --keep-claim
+          python3 scripts/run_cycle.py --agent agent-south | tee /tmp/second.txt
+          grep -q "standing down" /tmp/second.txt
+
+      - name: The credential wrapper refuses to send
+        run: |
+          if bin/mailer-gw send --thread t-demo; then
+            echo "send was NOT blocked" >&2; exit 1
+          fi
+
+      - name: The work log carries the sign-off row
+        run: cat desk/work-log.csv
