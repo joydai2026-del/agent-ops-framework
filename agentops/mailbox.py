@@ -15,7 +15,7 @@ import os
 from collections import defaultdict
 from pathlib import Path
 
-from .learning import INBOUND, OUTBOUND, Message
+from .learning import INBOUND, OUTBOUND, Message, in_order
 
 
 class SendBlocked(PermissionError):
@@ -52,11 +52,19 @@ class Mailbox:
         grouped: dict[str, list[Message]] = defaultdict(list)
         for message in [*self.inbox(), *self.outbox()]:
             grouped[message.thread].append(message)
-        for thread in grouped.values():
-            thread.sort(key=lambda m: (m.sent_at, m.id))
-        return dict(grouped)
+        return {thread: in_order(messages) for thread, messages in grouped.items()}
 
     def existing_drafts(self) -> dict[str, str]:
+        """Thread id to draft body.
+
+        LIMITATION, stated because it changes what a real adapter must do: this
+        demo store keys drafts by thread and overwrites. If a second inbound
+        message arrives and the desk redrafts before the human sends the first
+        draft, her sent message is diffed against the wrong draft and the lesson
+        is false. A real adapter must keep drafts individually addressable
+        (draft id, the inbound message answered, created time) and match a sent
+        message to its own unconsumed draft. See docs/porting.md.
+        """
         drafts: dict[str, str] = {}
         for path in sorted((self.root / "drafts").glob("*.json")):
             raw = json.loads(path.read_text(encoding="utf-8"))
@@ -64,12 +72,17 @@ class Mailbox:
                 drafts[item["thread"]] = item["body"]
         return drafts
 
-    def save_draft(self, thread: str, subject: str, body: str) -> Path:
+    def save_draft(self, thread: str, subject: str, body: str,
+                   in_reply_to: str | None = None) -> Path:
         target = self.root / "drafts" / f"{thread}.json"
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps(
-            {"thread": thread, "subject": subject, "body": body}, indent=2) + "\n",
-            encoding="utf-8")
+        record = {"thread": thread, "subject": subject, "body": body}
+        if in_reply_to:
+            # Provenance: which inbound message this draft answers. The demo
+            # store cannot yet use it to disambiguate, but recording it is what
+            # makes a later fix possible without losing history.
+            record["in_reply_to"] = in_reply_to
+        target.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
         return target
 
     def send(self, *_args, **_kwargs):

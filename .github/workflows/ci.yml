@@ -29,5 +29,22 @@ jobs:
             echo "send was NOT blocked" >&2; exit 1
           fi
 
+      - name: A stale claim is taken over and the rescue reaches the log
+        run: |
+          set -euo pipefail
+          scripts/reset-demo.sh
+          python3 scripts/run_cycle.py --agent agent-north --keep-claim --lease 1
+          sleep 2
+          python3 scripts/run_cycle.py --agent agent-relief | tee /tmp/relief.txt
+          grep -q "took over a stale claim" /tmp/relief.txt
+          grep -q "took over a stale claim" desk/work-log.csv
+
+      - name: The hourly skip rule is enforced, not just documented
+        run: |
+          set -euo pipefail
+          python3 scripts/run_cycle.py --agent agent-relief \
+            --cycle hourly-inbox-sweep --run-key 11 | tee /tmp/hourly.txt
+          grep -q "SKIPPED-RECENT" /tmp/hourly.txt
+
       - name: The work log carries the sign-off row
         run: cat desk/work-log.csv

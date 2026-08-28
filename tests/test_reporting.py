@@ -87,6 +87,57 @@ class WorkLogTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["status"], COMPLETE)
 
+    def test_each_hourly_occurrence_gets_its_own_row(self):
+        # Keying on (date, cycle) alone made every sweep overwrite the last, so
+        # a desk that ran six times looked like it ran once.
+        for hour in ("11", "12", "13"):
+            hourly = CycleReport(cycle="hourly-inbox-sweep", agent="agent-south",
+                                 lanes=["learning", "drafting"])
+            hourly.record("learning", "1 lesson")
+            hourly.record("drafting", "1 draft")
+            worklog.append(self.path, hourly, when=STAMP, schema=self.schema,
+                           run_key=hour)
+        rows = worklog.read(self.path)
+        self.assertEqual(len(rows), 3)
+        self.assertEqual([r["run_key"] for r in rows], ["11", "12", "13"])
+
+    def test_a_retry_of_the_same_occurrence_still_updates_in_place(self):
+        for status_line in ("BLOCKED credential refused", "2 drafts"):
+            hourly = CycleReport(cycle="hourly-inbox-sweep", agent="agent-south",
+                                 lanes=["learning", "drafting"])
+            hourly.record("learning", "1 lesson")
+            hourly.record("drafting", status_line)
+            worklog.append(self.path, hourly, when=STAMP, schema=self.schema,
+                           run_key="11")
+        rows = worklog.read(self.path)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["status"], COMPLETE)
+
+    def test_a_takeover_reaches_the_log_not_just_the_terminal(self):
+        r = report(learning="3", drafting="2", deliveries="1")
+        r.notes = "took over a stale claim from agent-north"
+        row = worklog.append(self.path, r, when=STAMP, schema=self.schema)
+        self.assertIn("took over a stale claim", row["notes"])
+
+    def test_a_corrupt_or_reordered_header_is_refused(self):
+        self.path.write_text("cycle,date,agent,status\nx,y,z,COMPLETE\n",
+                             encoding="utf-8")
+        with self.assertRaises(worklog.WorkLogError):
+            worklog.append(self.path, report(learning="3"), when=STAMP)
+
+    def test_the_log_separates_missing_from_unhealthy(self):
+        blocked = report(learning="3", drafting="BLOCKED no credential",
+                         deliveries="ZERO WORK")
+        worklog.append(self.path, blocked, when=STAMP, schema=self.schema)
+        # It ran, so it is not missing.
+        self.assertNotIn("morning-supplier-sweep",
+                         worklog.missing_cycles(self.path, "2026-03-02",
+                                                ["morning-supplier-sweep"]))
+        # It ran badly, so it is unhealthy.
+        self.assertEqual(
+            [r["cycle"] for r in worklog.unhealthy_cycles(self.path, "2026-03-02")],
+            ["morning-supplier-sweep"])
+
     def test_a_lane_a_cycle_does_not_run_reads_differently_from_one_that_failed(self):
         hourly = CycleReport(cycle="hourly-inbox-sweep", agent="agent-south",
                              lanes=["learning", "drafting"])
@@ -114,8 +165,8 @@ class WorkLogTests(unittest.TestCase):
                        when=STAMP, schema=self.schema)
         head = self.path.read_text(encoding="utf-8").splitlines()[0]
         self.assertEqual(head,
-                         "date,cycle,agent,status,learning,drafting,deliveries,"
-                         "notes,signed_off")
+                         "date,cycle,run_key,agent,status,learning,drafting,"
+                         "deliveries,notes,signed_off")
 
 
 class RunbookTests(unittest.TestCase):
@@ -129,6 +180,40 @@ class RunbookTests(unittest.TestCase):
     def test_the_prose_a_model_executes_survives_parsing(self):
         book = load(ROOT / "desk" / "runbooks" / "morning-supplier-sweep.md")
         self.assertIn("Sent reply gate", book.instructions())
+
+    def test_policy_the_prose_states_is_carried_in_the_header(self):
+        # The gap this closes: the hourly runbook described a 45 minute skip
+        # rule and a conditional logging rule that nothing implemented. A rule
+        # written only in prose reads as a guarantee and behaves as a
+        # suggestion.
+        hourly = load(ROOT / "desk" / "runbooks" / "hourly-inbox-sweep.md")
+        self.assertEqual(hourly.skip_if_ran_within_minutes, 45)
+        self.assertIn("morning-supplier-sweep", hourly.skip_if_cycles_ran)
+        self.assertEqual(hourly.log_when, "work-or-blocked")
+        morning = load(ROOT / "desk" / "runbooks" / "morning-supplier-sweep.md")
+        self.assertEqual(morning.skip_if_ran_within_minutes, 0)
+        self.assertEqual(morning.log_when, "always")
+
+    def test_an_unknown_logging_policy_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = Path(tmp) / "bad.md"
+            bad.write_text("---\ncycle: c\ntitle: t\nlog_when: sometimes\n"
+                           "lanes:\n  - a\n---\nbody\n", encoding="utf-8")
+            with self.assertRaises(RunbookError):
+                load(bad)
+
+    def test_the_readme_runbook_example_actually_parses(self):
+        # A README snippet in a format the parser rejects is a documentation
+        # bug that only a reader hits.
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        start = readme.index("```markdown")
+        snippet = readme[start:readme.index("```", start + 3)]
+        snippet = snippet.split("\n", 1)[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            example = Path(tmp) / "example.md"
+            example.write_text(snippet, encoding="utf-8")
+            book = load(example)
+            self.assertEqual(book.lanes, ["learning", "drafting", "deliveries"])
 
     def test_a_headerless_or_broken_runbook_is_refused(self):
         with tempfile.TemporaryDirectory() as tmp:

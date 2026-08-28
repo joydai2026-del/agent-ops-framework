@@ -33,6 +33,12 @@ class Runbook:
     lanes: list[str]
     lease_seconds: int
     body: str
+    # Operating policy the code enforces, so a rule the prose states is not
+    # left as an honour system. A documented rule nothing implements is worse
+    # than no rule: it reads as a guarantee and behaves as a suggestion.
+    skip_if_ran_within_minutes: int = 0
+    skip_if_cycles_ran: tuple[str, ...] = ()
+    log_when: str = "always"          # "always" or "work-or-blocked"
 
     def instructions(self) -> str:
         return self.body
@@ -78,14 +84,29 @@ def load(path: str | os.PathLike[str]) -> Runbook:
     if len(set(lanes)) != len(lanes):
         raise RunbookError(f"{file_path}: duplicate lane names in {lanes}")
 
-    try:
-        lease = int(str(header.get("lease_seconds", 1800)))
-    except ValueError as exc:
-        raise RunbookError(f"{file_path}: lease_seconds must be an integer") from exc
+    def integer(key: str, default: int) -> int:
+        try:
+            return int(str(header.get(key, default)))
+        except ValueError as exc:
+            raise RunbookError(f"{file_path}: {key} must be an integer") from exc
+
+    log_when = str(header.get("log_when", "always"))
+    if log_when not in ("always", "work-or-blocked"):
+        raise RunbookError(
+            f"{file_path}: log_when must be 'always' or 'work-or-blocked', "
+            f"not {log_when!r}"
+        )
+
+    skip_cycles = header.get("skip_if_cycles_ran", [])
+    if isinstance(skip_cycles, str):
+        skip_cycles = [part.strip() for part in skip_cycles.split(",") if part.strip()]
 
     return Runbook(path=file_path, cycle=str(header["cycle"]),
                    title=str(header["title"]), lanes=[str(lane) for lane in lanes],
-                   lease_seconds=lease, body=body)
+                   lease_seconds=integer("lease_seconds", 1800), body=body,
+                   skip_if_ran_within_minutes=integer("skip_if_ran_within_minutes", 0),
+                   skip_if_cycles_ran=tuple(str(c) for c in skip_cycles),
+                   log_when=log_when)
 
 
 def load_all(directory: str | os.PathLike[str]) -> dict[str, Runbook]:

@@ -8,9 +8,28 @@ changes when you swap a model, a messaging system, or a mail provider.
 | Transport for the poke | `scripts/send-poke.sh` prints it | set `POKE_TRANSPORT` to a CLI that reads the message on stdin and takes `--channel` plus repeated `--mention` |
 | The roster | `desk/channel/poke.conf` | the same file, with real agent identifiers. Adding or dropping an agent stays a one line config change |
 | Message store | `agentops/mailbox.py` reads JSON files | an adapter over the real API, exposing `inbox`, `outbox`, `threads`, `existing_drafts`, `save_draft` |
+| Draft identity | one draft per thread, overwritten | drafts individually addressable (see the requirement below) |
 | The model | `draft_reply` in `scripts/run_cycle.py` is a stub | a call to whichever model the claiming agent routed the lane to, given the thread, the runbook prose, and `pool.guidance()` |
 
-Four things to keep as they are, because they are the load bearing parts:
+## One requirement the demo store does not meet
+
+The demo keys drafts by thread and overwrites them. That is fine for a fixture
+and wrong for a real mailbox, so build the adapter with this in mind rather than
+copying the shortcut:
+
+If a second inbound message arrives on a thread and the desk redrafts before the
+human sends the first draft, her sent message gets diffed against the wrong
+draft, and the "lesson" the pool records is a fabrication. A false lesson is
+worse than a missing one: it is applied confidently to every future draft.
+
+So a real adapter must keep drafts individually addressable, carrying a draft
+id, the inbound message the draft answers, a checksum of the body as drafted,
+and a created time; then match a sent message to its own unconsumed draft, and
+fall back to treating the message as a direct reply (no diff) when no draft
+matches. `save_draft` already records `in_reply_to` so the provenance exists
+before the matching does. Never silently overwrite an open draft.
+
+## Four things to keep as they are, because they are the load bearing parts
 
 1. **The claim stays a file on shared storage.** If the roster spans machines,
    the state directory has to be visible to all of them, and it has to be one

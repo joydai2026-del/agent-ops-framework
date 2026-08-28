@@ -15,7 +15,7 @@ architecture is not.
 ```
 git clone https://github.com/joydai2026-del/agent-ops-framework
 cd agent-ops-framework
-python3 -m unittest discover -s tests      # 52 tests, no dependencies
+python3 -m unittest discover -s tests      # 74 tests, no dependencies
 python3 scripts/run_cycle.py --agent agent-north --keep-claim
 python3 scripts/run_cycle.py --agent agent-south   # stands down, cycle taken
 ```
@@ -55,13 +55,16 @@ flowchart TB
 
     LEARN <--> POOL[("Shared knowledge pool")]
     DRAFT --> POOL
-    DRAFT --> GATE["Gated credential wrapper<br/>send verb not reachable"]
+    DRAFT --> GATE["Gated credential wrapper<br/>send refused below the agent"]
 ```
 
 ### 1. Scheduled pokes, with a second clock behind the first
 
-The schedule is a cron in GitHub Actions that sends exactly one message to the
-roster. A local scheduler runs the same poke as a backup.
+The schedule is a cron in GitHub Actions (`.github/workflows/poke-morning.yml`)
+that sends exactly one message to the roster. A local scheduler
+(`scripts/backup-clock.sh`, installed as a cron entry, launchd job or systemd
+timer on the desk's own machine) runs the same poke as a backup, through the
+same sender and the same roster config.
 
 Why two clocks: every scheduler drops runs. Hosted cron is late at busy hours
 and occasionally skips a run outright; a laptop scheduler is only as awake as
@@ -91,13 +94,25 @@ line rather than an architectural commitment.
 
 Why claiming and not coordination: the alternative is a scheduler that knows
 which agents are healthy, which is a second system that can itself be wrong. The
-claim is a file created with `O_CREAT|O_EXCL`, atomic on any shared filesystem.
-The winner is whoever writes first. There is nothing to keep in sync.
+claim is a file published with `os.link`, which is atomic on any shared
+filesystem and fails if the name already exists. The winner is whoever links
+first. There is nothing to keep in sync.
 
-Every claim carries a lease. An agent that dies mid cycle cannot wedge the desk
-forever: after the lease expires another agent takes over, and the takeover is
-recorded so the work log shows a cycle was rescued rather than silently rerun.
-See `agentops/claim.py` and its ten tests.
+Two details separate a lock from a note. The claim is **published complete**: it
+is written to a uniquely named file and linked into place with `os.link`, which
+is atomic and fails if the name exists. The obvious version (create the file,
+then write it) leaves a window where a contender reads zero bytes, decides the
+lock is corrupt, and becomes a second winner, which a real 8-process race
+reproduces on the first try. And every claim carries a **lease**: an agent that
+dies mid cycle cannot wedge the desk forever, so after the lease expires another
+agent takes over, and `took_over_from` is written into the cycle's work log row
+so the rescue is visible to a human rather than only in a terminal.
+
+What the lock deliberately does not do is fence a slow worker: an agent that
+overruns its lease is not interrupted. That is why every write a cycle performs
+is idempotent by construction, which turns an overrun into a boring duplicate
+instead of a corruption. See `agentops/claim.py`, its unit tests, and the
+process-level race in `tests/test_concurrency.py`.
 
 ### 3. Runbooks as versioned playbooks any model can execute
 
@@ -107,7 +122,12 @@ lease) over prose instructions.
 ```markdown
 ---
 cycle: morning-supplier-sweep
-lanes: [learning, drafting, deliveries]
+title: Morning supplier sweep
+lease_seconds: 1800
+lanes:
+  - learning
+  - drafting
+  - deliveries
 ---
 ## 1. Learning lane (always first)
 Read every message the owner sent since the last run...
@@ -122,6 +142,13 @@ Why the header is machine readable: the code needs the lanes, because lane
 coverage is what stops a lane quietly disappearing from the reports. The prose
 below it is what the model follows. One file, both readers, no drift between the
 documentation and the thing that runs.
+
+The header also carries the cycle's operating policy, which is a rule this repo
+learned the hard way. The hourly runbook's prose described a skip rule ("if a
+full cycle finished in the last 45 minutes, stand down") and a logging rule that
+nothing implemented. A rule written only in prose reads as a guarantee and
+behaves as a suggestion, so anything the code must honour is a header field
+(`skip_if_ran_within_minutes`, `log_when`) with a test on it.
 
 Nothing in a runbook names a model. Model routing is a convention (the agent
 that claims the cycle is the router, and it sends each step to the cheapest
@@ -154,9 +181,19 @@ $ echo $?
 This matters because no mail provider offers a scope that grants drafting
 without granting sending. The capability the desk needs does not exist upstream,
 so it is constructed at the boundary the desk controls. **Prefer a capability
-guarantee over a policy promise wherever the boundary is yours to build.** The
-escape hatch is per call and explicit, so a human who wants one send has to say
-so for that one command.
+guarantee over a policy promise wherever the boundary is yours to build.**
+
+How strong this actually is, stated precisely, because a boundary that oversells
+itself is how people stop checking it. The escape hatch is an environment
+variable, so any process that can set its own environment can set it: this is a
+hard stop against accident and drift, not against a determined caller. What it
+buys is still real. Sending is no longer the default path, every send is a
+deliberate and greppable act, and no amount of prompt text or model swapping can
+turn "draft this" into "send this" on its own. To make it absolute, the override
+moves somewhere the agent cannot reach: a different OS user, a separately
+authenticated local service, or a credential held outside the agent's
+environment. That is a deployment decision, so `bin/mailer-gw` names it rather
+than assuming it.
 
 ### 5. Silence is not allowed
 
@@ -178,8 +215,8 @@ lines, never typed by the agent describing its own work.
 
 ### 6. A work log any stakeholder can read
 
-The last step of every cycle appends one row to a table: date, cycle, agent,
-status, one column per lane, notes, sign-off time.
+The last step of every cycle appends one row to a table: date, cycle, run key,
+agent, status, one column per lane, notes, sign-off time.
 
 **No row means the cycle did not finish.** That single sentence is the whole
 value. Nobody has to read a chat transcript, dig through logs, or trust an
@@ -187,13 +224,26 @@ agent's summary of itself. They open one table and see the week.
 
 It is CSV here and a shared spreadsheet in production, which is deliberate: a
 spreadsheet, a terminal, `git diff`, and every language can read it. That is
-what "agent agnostic" has to mean once the humans are included. The same table
-also answers what did NOT finish (`worklog.missing_cycles`), which is what turns
-a diary into a monitor and gives the next cycle its catch-up list.
+what "agent agnostic" has to mean once the humans are included.
+
+The same table answers the two monitoring questions separately, because they are
+different questions: `missing_cycles` finds cycles with **no row at all** (they
+never finished), and `unhealthy_cycles` finds rows that finished `PARTIAL` or
+`BLOCKED` (they finished badly). Collapsing those would hide a blocked cycle
+behind a present row. Together they turn a diary into a monitor and give the
+next cycle its catch-up list.
+
+Identity is the **occurrence**, not the day: the key is (date, cycle, run key).
+An hourly sweep runs many times a day, so keying on the day alone would have
+every sweep overwrite the last and leave a log claiming the desk ran once. A
+retry of the same occurrence still updates in place, which is what makes a
+duplicate poke harmless.
 
 A lane a cycle does not run is written `n/a`, which reads differently from a
 lane that was supposed to run and did not (`NOT RUN`). Blurring those two is how
-a broken lane hides.
+a broken lane hides. Concurrent sign-offs go through a file lock, because an
+unguarded read-modify-write on a shared table loses rows, and a lost row reads
+exactly like a cycle that never finished.
 
 ---
 
@@ -246,10 +296,14 @@ silo the next agent cannot see, and a desk with a roster changes agents
 constantly. She should never have to teach the same edit twice, no matter which
 model picks the work up next.
 
-**Deduplicated by fingerprint, watermarked by time.** A re-poked cycle, or an
-agent that took over a stale claim, cannot double count. The pool tracks the
-latest sent message it has already learned from, so the next run starts exactly
-where the last one stopped.
+**Deduplicated by identity, not by clock.** What counts as already learned from
+is the set of message ids the pool holds; a timestamp is only a cheap pre-filter
+for narrowing a provider query. An exclusive time watermark permanently drops a
+second message sent in the same second as the last one learned, and drops mail
+that arrives late carrying an older timestamp, which is the ordinary case of two
+replies fired back to back. The append itself is guarded by a lock, because
+check-then-write is only deduplication if nothing can interleave between the
+check and the write.
 
 ### The gate the loop depends on
 
@@ -266,6 +320,20 @@ contradicts the position she already took, because it was written without ever
 seeing that position. The fix is not a reminder to read carefully. It is a
 mechanical step with a test named after the failure
 (`test_the_gate_needs_the_whole_thread_not_just_the_inbound_message`).
+
+Two details the gate lives or dies on:
+
+**Timestamps are compared, never sorted as text.** `09:00:00-05:00` is later
+than `13:30:00Z` in real time and earlier as a string, so string ordering makes
+an answered thread look open on exactly the threads where a phone and a laptop
+both replied. Every timestamp is parsed to an aware datetime, and a naive one is
+refused rather than assumed to be UTC.
+
+**A courtesy close is a thank-you and nothing else.** "Thanks, but can you also
+send the invoice?" opens with gratitude and then asks for something. Closing
+that thread means the desk never answers a live request, so the classifier
+refuses to close anything carrying an ask. The asymmetry is deliberate: one
+draft too many is recoverable, a request nobody answers is not.
 
 ---
 
@@ -286,10 +354,12 @@ desk/                the demo desk: a fictional bakery's supplier desk
   channel/           poke.conf (roster as config) and the poke texts
   data/              fabricated inbound, sent and draft mail
 
-bin/mailer-gw        the gated credential wrapper: send is not reachable
-scripts/send-poke.sh the alarm clock, zero work logic
-scripts/run_cycle.py one full cycle end to end
-tests/               52 tests over the claim, report, log and learning logic
+bin/mailer-gw            the gated credential wrapper: send is refused, loudly
+scripts/send-poke.sh     the alarm clock, zero work logic
+scripts/backup-clock.sh  the second clock, same sender and roster
+scripts/run_cycle.py     one full cycle end to end
+tests/                   74 tests, including real multi-process races over the
+                         claim, the work log and the learning pool
 ```
 
 The reference implementation has **no dependencies**. Not a stylistic
@@ -304,9 +374,13 @@ small is what lets any model, any agent runtime, and any human operate the desk.
 python3 scripts/run_cycle.py --agent agent-north --keep-claim
 python3 scripts/run_cycle.py --agent agent-south
 
-# A dead agent does not wedge the desk: a one second lease expires, relief takes over
+# A dead agent does not wedge the desk: a one second lease expires, relief takes
+# over, and the rescue is written into the work log's notes column
 python3 scripts/run_cycle.py --agent agent-north --keep-claim --lease 1
 sleep 2 && python3 scripts/run_cycle.py --agent agent-relief
+
+# The hourly sweep's skip rule, enforced from the runbook header
+python3 scripts/run_cycle.py --agent agent-relief --cycle hourly-inbox-sweep --run-key 11
 
 # The credential refuses to send, and says so
 bin/mailer-gw send --thread t-alpine-dairy; echo "exit $?"
@@ -347,10 +421,23 @@ combination once broke every scheduled run while the test channel passed.
 **Derive the status, do not ask for it.** An agent reporting on its own work is
 the wrong narrator. The status word is computed from the lane lines.
 
-**Idempotency at every write.** Claims are re-entrant for the holder, work log
-rows are keyed by date and cycle, and the learning pool is deduplicated by
-fingerprint. With two clocks and a roster, the same cycle WILL sometimes be
-attempted twice, and the correct response is for that to be boring.
+**Idempotency at every write.** Claims are re-entrant for their live holder,
+work log rows are keyed by occurrence, and the learning pool is deduplicated by
+fingerprint under a lock. With two clocks and a roster, the same cycle WILL
+sometimes be attempted twice, and the correct response is for that to be boring.
+
+**Test the window, not the logic.** A lock checked serially always looks
+correct, because the entire failure mode lives between one agent reading and
+another writing. `tests/test_concurrency.py` runs eight real processes through a
+barrier; against the previous implementations it produced two simultaneous claim
+winners, lost seven of eight work log rows, and recorded one lesson six times.
+Serial tests found none of that.
+
+**Say what a boundary does not do.** The claim does not fence a slow worker, the
+demo draft store cannot tell two drafts on one thread apart, and the send gate's
+override is reachable by anything that can set its own environment. Each is
+written down at the code that has the limitation, because an unstated limit is
+indistinguishable from a guarantee right up until it matters.
 
 ---
 

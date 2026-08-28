@@ -14,6 +14,21 @@
 # The escape hatch is per call and explicit, so a human who genuinely wants one
 # send has to say so for that one command:
 #   MAILER_GW_ALLOW_SEND=1 mailer-gw send --thread t-alpine-dairy
+#
+# HOW STRONG THIS ACTUALLY IS, stated honestly, because a boundary that oversells
+# itself is how people stop checking it. The env override is a guard against
+# ACCIDENT and DRIFT, not against a determined caller: any process that can set
+# its own environment can set MAILER_GW_ALLOW_SEND. What it does buy is real:
+# sending stops being the default path, every send is a deliberate, greppable,
+# auditable act, and no amount of prompt text or model swapping can turn
+# "draft this" into "send this" on its own.
+#
+# To make it a hard boundary rather than a strong default, the override must
+# move somewhere the agent cannot reach: run the sender as a different OS user
+# the agent cannot become, put it behind a separately authenticated local
+# service, or hold the sending credential outside the agent's environment
+# entirely. That is a deployment decision, so it is named here rather than
+# assumed.
 set -euo pipefail
 
 REAL_CLI="${MAILER_GW_BACKEND:-$(dirname "$0")/mailer-backend}"

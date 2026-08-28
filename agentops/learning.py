@@ -30,12 +30,15 @@ be taught again.
 
 from __future__ import annotations
 
+import contextlib
 import difflib
+import fcntl
 import hashlib
 import json
 import os
 import re
 from dataclasses import dataclass, asdict, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 INBOUND = "inbound"
@@ -50,11 +53,60 @@ CLOSED_NO_DRAFT = "closed: newest message is the operator's own reply"
 COURTESY_CLOSE = "closed: newest inbound message is a courtesy close"
 DRAFT_WARRANTED = "open: newest message is inbound and awaiting an answer"
 
-_COURTESY = re.compile(
+_COURTESY_OPENER = re.compile(
     r"^\W*(thanks|thank you|thx|got it|confirmed|sounds good|perfect|great,? thanks)\b",
     re.IGNORECASE,
 )
+# A courtesy close is a thank-you and NOTHING else. "Thanks, but can you also
+# send the invoice?" opens with gratitude and then asks for something; closing
+# that thread means the desk never answers a live request, which is a worse
+# failure than drafting one reply too many. So the classifier is deliberately
+# conservative: short, and carrying no ask.
+_ASK = re.compile(
+    r"\?|\b(can|could|would|will|please|need|want|send|confirm|let me know|"
+    r"when|what|who|how|why|where|but|however|also|one more)\b",
+    re.IGNORECASE,
+)
+_COURTESY_MAX_CHARS = 140
 _SENTENCE = re.compile(r"(?<=[.!?])\s+|\n+")
+
+
+def parse_time(value: str) -> datetime:
+    """Parse an ISO 8601 timestamp into an aware datetime in UTC.
+
+    Timestamps are COMPARED, never sorted as strings. String order is wrong the
+    moment two messages carry different UTC offsets: `09:00:00-05:00` is later
+    than `13:30:00Z` in real time and earlier as text. The sent reply gate
+    decides whether to answer a thread from exactly this comparison, so getting
+    it wrong produces the duplicate contradictory reply the gate exists to
+    prevent, on precisely the threads where a phone and a laptop both replied.
+
+    A naive timestamp is rejected rather than assumed to be UTC, because
+    guessing an offset reintroduces the same bug quietly.
+    """
+    text = value.strip()
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise ValueError(f"not an ISO 8601 timestamp: {value!r}") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(
+            f"timestamp {value!r} has no timezone. Messages from different "
+            "sources arrive with different offsets, so an assumed one silently "
+            "reorders threads."
+        )
+    return parsed.astimezone(timezone.utc)
+
+
+def is_courtesy_close(body: str) -> bool:
+    text = (body or "").strip()
+    if not text or len(text) > _COURTESY_MAX_CHARS:
+        return False
+    if not _COURTESY_OPENER.match(text):
+        return False
+    return not _ASK.search(text)
 
 
 @dataclass(frozen=True)
@@ -62,9 +114,13 @@ class Message:
     id: str
     thread: str
     direction: str
-    sent_at: str  # ISO 8601, sorts lexicographically
+    sent_at: str  # ISO 8601, timezone aware; compared through parse_time
     subject: str
     body: str
+
+    @property
+    def when(self) -> datetime:
+        return parse_time(self.sent_at)
 
     @staticmethod
     def from_dict(raw: dict) -> "Message":
@@ -73,8 +129,10 @@ class Message:
             raise ValueError(f"message is missing fields: {sorted(missing)}")
         if raw["direction"] not in (INBOUND, OUTBOUND):
             raise ValueError(f"unknown direction {raw['direction']!r}")
-        return Message(**{k: raw[k] for k in
-                          ("id", "thread", "direction", "sent_at", "subject", "body")})
+        message = Message(**{k: raw[k] for k in
+                             ("id", "thread", "direction", "sent_at", "subject", "body")})
+        message.when  # reject an unusable timestamp at the boundary, not mid gate
+        return message
 
 
 @dataclass
@@ -97,10 +155,15 @@ def _sentences(text: str) -> list[str]:
     return [part.strip() for part in _SENTENCE.split(text or "") if part.strip()]
 
 
+def in_order(messages: list[Message]) -> list[Message]:
+    """Oldest first, by real time. The id breaks ties deterministically."""
+    return sorted(messages, key=lambda m: (m.when, m.id))
+
+
 def newest(messages: list[Message]) -> Message | None:
     if not messages:
         return None
-    return sorted(messages, key=lambda m: (m.sent_at, m.id))[-1]
+    return in_order(messages)[-1]
 
 
 def thread_state(messages: list[Message]) -> tuple[bool, str]:
@@ -114,7 +177,7 @@ def thread_state(messages: list[Message]) -> tuple[bool, str]:
         return False, "closed: empty thread"
     if latest.direction == OUTBOUND:
         return False, CLOSED_NO_DRAFT
-    if _COURTESY.match(latest.body.strip()):
+    if is_courtesy_close(latest.body):
         return False, COURTESY_CLOSE
     return True, DRAFT_WARRANTED
 
@@ -164,21 +227,34 @@ def learn_from_outbox(
     drafts: dict[str, str],
     since: str | None = None,
     inbound_threads: set[str] | None = None,
+    seen_ids: set[str] | None = None,
 ) -> list[Lesson]:
-    """Build lessons from every outbound message since the last run.
+    """Build lessons from every outbound message not yet learned from.
 
     `drafts` maps thread id to the body this desk had drafted, if any.
-    `since` is the previous run's high water mark (ISO timestamp, exclusive).
     `inbound_threads` are the threads the desk has ever seen inbound mail on;
     an outbound message on a thread outside that set was originated by the
     operator and the desk never saw it coming.
+
+    What counts as "already learned from" is `seen_ids`, the set of message ids
+    the pool holds. `since` is only a cheap pre-filter for the common case, and
+    it is INCLUSIVE of its own second, deliberately: an exclusive timestamp
+    watermark silently drops a second message sent in the same second as the
+    last one learned, and drops mail that arrives late with an older timestamp.
+    Identity is the correct key for "have I seen this"; time is an optimization.
     """
     known_threads = inbound_threads or set()
+    already = seen_ids or set()
+    floor = parse_time(since) if since else None
     lessons: list[Lesson] = []
-    for message in sorted(outbox, key=lambda m: (m.sent_at, m.id)):
+    for message in in_order(outbox):
         if message.direction != OUTBOUND:
             continue
-        if since and message.sent_at <= since:
+        if message.id in already:
+            continue
+        if floor is not None and not already and message.when < floor:
+            # No identity information available, so fall back to time alone.
+            # Inclusive, for the same-second case above.
             continue
 
         draft = drafts.get(message.thread)
@@ -216,11 +292,27 @@ class LearningPool:
     """Append only JSONL pool, shared across agents and models.
 
     Deduplicated by lesson fingerprint so a re-run of the same cycle, or a
-    second agent that took over a stale claim, cannot double count.
+    second agent that took over a stale claim, cannot double count. The
+    read-check-append is done under an exclusive `flock`, because two agents
+    that both read an empty pool would otherwise both append the same lesson:
+    checking before writing is only a deduplication if nothing can interleave
+    between the check and the write.
     """
 
     def __init__(self, path: str | os.PathLike[str]):
         self.path = Path(path)
+
+    @contextlib.contextmanager
+    def _guard(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        guard = self.path.with_suffix(self.path.suffix + ".guard")
+        handle = os.open(str(guard), os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+            os.close(handle)
 
     def load(self) -> list[dict]:
         if not self.path.exists():
@@ -237,28 +329,40 @@ class LearningPool:
 
     def add(self, lessons: list[Lesson]) -> list[Lesson]:
         """Append new lessons. Returns only the ones actually written."""
-        seen = self.fingerprints()
-        fresh = []
-        for lesson in lessons:
-            fp = lesson.fingerprint()
-            if fp in seen:
-                continue
-            seen.add(fp)
-            fresh.append(lesson)
-        if not fresh:
+        if not lessons:
             return []
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("a", encoding="utf-8") as handle:
-            for lesson in fresh:
-                record = {"fingerprint": lesson.fingerprint(), **asdict(lesson)}
-                handle.write(json.dumps(record, sort_keys=True) + "\n")
-        return fresh
+        with self._guard():
+            seen = self.fingerprints()
+            fresh = []
+            for lesson in lessons:
+                fp = lesson.fingerprint()
+                if fp in seen:
+                    continue
+                seen.add(fp)
+                fresh.append(lesson)
+            if not fresh:
+                return []
+            with self.path.open("a", encoding="utf-8") as handle:
+                for lesson in fresh:
+                    record = {"fingerprint": lesson.fingerprint(), **asdict(lesson)}
+                    handle.write(json.dumps(record, sort_keys=True) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            return fresh
+
+    def learned_message_ids(self) -> set[str]:
+        """The identities already represented. This is the real watermark."""
+        return {entry["source_message"] for entry in self.load()}
 
     def high_water_mark(self, outbox: list[Message]) -> str | None:
-        """Latest sent timestamp already represented in the pool."""
-        known = {entry["source_message"] for entry in self.load()}
-        stamps = [m.sent_at for m in outbox if m.id in known]
-        return max(stamps) if stamps else None
+        """Latest sent timestamp already represented in the pool.
+
+        A convenience for narrowing a provider query. It is never the sole test
+        for "already learned from"; `learned_message_ids` is.
+        """
+        known = self.learned_message_ids()
+        stamps = [m.when for m in outbox if m.id in known]
+        return max(stamps).isoformat() if stamps else None
 
     def guidance(self, limit: int = 20) -> list[str]:
         """What a drafting step should read before it writes anything."""

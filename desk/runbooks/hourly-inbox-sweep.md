@@ -5,6 +5,10 @@ lease_seconds: 600
 lanes:
   - learning
   - drafting
+# Policy the code enforces, not an honour system. See section 1 and 4 below.
+skip_if_ran_within_minutes: 45
+skip_if_cycles_ran: morning-supplier-sweep, hourly-inbox-sweep
+log_when: work-or-blocked
 ---
 
 # Hourly inbox sweep

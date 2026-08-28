@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from agentops.learning import (  # noqa: E402
     CLOSED_NO_DRAFT, COURTESY_CLOSE, DIRECT_REPLY, DRAFT_WARRANTED,
     EDIT_OF_DRAFT, ORIGINATED, LearningPool, Message, diff_draft_against_sent,
-    learn_from_outbox, thread_state,
+    learn_from_outbox, parse_time, thread_state,
 )
 
 
@@ -53,8 +53,53 @@ class SentReplyGateTests(unittest.TestCase):
                       "Thanks, confirmed on our end.")]
         self.assertEqual(thread_state(thread)[1], COURTESY_CLOSE)
 
+    def test_a_thank_you_that_also_asks_for_something_stays_open(self):
+        # The dangerous direction. Drafting one reply too many is recoverable;
+        # closing a thread that contained a live request means the desk never
+        # answers it and nobody finds out.
+        for body in ("Thanks! But can you also send the invoice?",
+                     "Thanks, confirmed. One more thing, when does the rate change?",
+                     "Got it, thank you. Please forward the signed sheet."):
+            with self.subTest(body=body):
+                thread = [msg("in-1", "t", "inbound", "2026-03-02T08:00:00Z", body)]
+                should, reason = thread_state(thread)
+                self.assertTrue(should, f"wrongly closed: {reason}")
+
+    def test_a_long_message_opening_with_thanks_is_not_a_courtesy_close(self):
+        body = "Thanks. " + ("We should also revisit the delivery schedule. " * 6)
+        thread = [msg("in-1", "t", "inbound", "2026-03-02T08:00:00Z", body)]
+        self.assertTrue(thread_state(thread)[0])
+
     def test_empty_thread_is_not_drafted_on(self):
         self.assertFalse(thread_state([])[0])
+
+
+class TimestampTests(unittest.TestCase):
+    """Timestamps are compared, never sorted as text."""
+
+    def test_mixed_offsets_order_by_real_time_not_by_string(self):
+        # 09:00-05:00 is 14:00 UTC, which is LATER than 13:30Z, but sorts
+        # earlier as a string. Under string ordering the gate sees the inbound
+        # message as newest and drafts a duplicate of a reply already sent.
+        thread = [
+            msg("in-1", "t", "inbound", "2026-03-02T13:30:00Z", "Can you confirm?"),
+            msg("out-1", "t", "outbound", "2026-03-02T09:00:00-05:00", "Confirmed."),
+        ]
+        should, reason = thread_state(thread)
+        self.assertFalse(should, "string ordering let a closed thread look open")
+        self.assertEqual(reason, CLOSED_NO_DRAFT)
+
+    def test_the_same_instant_in_two_notations_is_one_instant(self):
+        self.assertEqual(parse_time("2026-03-02T14:00:00Z"),
+                         parse_time("2026-03-02T09:00:00-05:00"))
+
+    def test_a_timestamp_with_no_timezone_is_refused_not_guessed(self):
+        with self.assertRaises(ValueError):
+            parse_time("2026-03-02T09:00:00")
+        with self.assertRaises(ValueError):
+            Message.from_dict({"id": "x", "thread": "t", "direction": "inbound",
+                               "sent_at": "2026-03-02 09:00", "subject": "s",
+                               "body": "b"})
 
 
 class DiffTests(unittest.TestCase):
@@ -100,13 +145,34 @@ class LearnFromOutboxTests(unittest.TestCase):
             {}, inbound_threads={"t-known"})
         self.assertEqual(lesson.kind, ORIGINATED)
 
-    def test_since_watermark_excludes_already_learned_mail(self):
+    def test_seen_ids_are_what_exclude_already_learned_mail(self):
         outbox = [
             msg("out-1", "t1", "outbound", "2026-03-01T10:00:00Z", "Old news."),
             msg("out-2", "t2", "outbound", "2026-03-02T10:00:00Z", "New news."),
         ]
-        lessons = learn_from_outbox(outbox, {}, since="2026-03-01T10:00:00Z")
+        lessons = learn_from_outbox(outbox, {}, since="2026-03-01T10:00:00Z",
+                                    seen_ids={"out-1"})
         self.assertEqual([l.source_message for l in lessons], ["out-2"])
+
+    def test_a_second_message_in_the_same_second_is_not_skipped(self):
+        # An exclusive timestamp watermark drops this one permanently, and it
+        # is the case that actually happens: two replies fired back to back.
+        outbox = [
+            msg("out-1", "t1", "outbound", "2026-03-02T10:00:00Z", "First."),
+            msg("out-2", "t2", "outbound", "2026-03-02T10:00:00Z", "Second."),
+        ]
+        lessons = learn_from_outbox(outbox, {}, since="2026-03-02T10:00:00Z",
+                                    seen_ids={"out-1"})
+        self.assertEqual([l.source_message for l in lessons], ["out-2"])
+
+    def test_mail_arriving_late_with_an_older_timestamp_is_still_learned_from(self):
+        outbox = [
+            msg("out-2", "t2", "outbound", "2026-03-02T10:00:00Z", "Newer."),
+            msg("out-1", "t1", "outbound", "2026-03-01T10:00:00Z", "Older, seen late."),
+        ]
+        lessons = learn_from_outbox(outbox, {}, since="2026-03-02T10:00:00Z",
+                                    seen_ids={"out-2"})
+        self.assertEqual([l.source_message for l in lessons], ["out-1"])
 
     def test_inbound_messages_are_never_learned_from_as_output(self):
         inbound = [msg("in-1", "t", "inbound", "2026-03-02T10:00:00Z", "Hello.")]
@@ -154,9 +220,10 @@ class LearningPoolTests(unittest.TestCase):
         pool = LearningPool(self.path)
         self.assertIsNone(pool.high_water_mark(outbox))
         pool.add(learn_from_outbox(outbox, {}))
-        self.assertEqual(pool.high_water_mark(outbox), "2026-03-02T10:00:00Z")
+        self.assertEqual(pool.learned_message_ids(), {"out-1", "out-2"})
         self.assertEqual(
-            learn_from_outbox(outbox, {}, since=pool.high_water_mark(outbox)), [])
+            learn_from_outbox(outbox, {}, since=pool.high_water_mark(outbox),
+                              seen_ids=pool.learned_message_ids()), [])
 
     def test_guidance_is_what_the_drafting_step_reads(self):
         pool = LearningPool(self.path)
